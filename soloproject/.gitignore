@@ -33,13 +33,47 @@ migrate_working_dir/
 /build/
 /coverage/
 
+# Common Dart/Flutter generated files
+*.packages
+.flutter-plugins
+.flutter-plugins-lock
+/ios/.symlinks/
+
 # Symbolication related
 app.*.symbols
 
 # Obfuscation related
 app.*.map.json
 
-# Android Studio will place build artifacts here
+# Android
+/android/local.properties
+/android/.gradle
 /android/app/debug
 /android/app/profile
 /android/app/release
+/android/**/generated/
+/android/app/build/
+
+# iOS/macOS
+/ios/Flutter/Generated.xcconfig
+/ios/Flutter/App.framework
+/ios/Flutter/engine
+/ios/Flutter/flutter_assets
+/ios/Pods/
+/ios/.generated
+/macos/Flutter/Generated.xcconfig
+/macos/Flutter/App.framework
+/macos/Flutter/engine
+/macos/Flutter/flutter_assets
+/macos/Pods/
+
+# Windows
+/windows/flutter/generated_plugins.cmake
+/windows/build/
+
+# Linux
+/linux/flutter/generated_plugins.cmake
+/linux/build/
+
+# Web
+/web/build/
