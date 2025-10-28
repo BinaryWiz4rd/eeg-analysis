@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:math';
+import 'dart:ui' show lerpDouble;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 
@@ -97,13 +99,13 @@ class SignalProcessor {
     if (buffer.isEmpty) return {'Activity': 0.0, 'Mobility': 0.0};
 
     final mean = buffer.reduce((a, b) => a + b) / buffer.length;
-    final activity = buffer.map((v) => pow(v - mean, 2)).reduce((a, b) => a + b) / buffer.length;
+    final activity = buffer.map((v) => pow(v - mean, 2).toDouble()).reduce((a, b) => a + b) / buffer.length;
 
     final diff = List.generate(buffer.length - 1, (i) => buffer[i + 1] - buffer[i]);
     if (diff.isEmpty) return {'Activity': activity, 'Mobility': 0.0};
 
     final meanDiff = diff.reduce((a, b) => a + b) / diff.length;
-    final activityDiff = diff.map((v) => pow(v - meanDiff, 2)).reduce((a, b) => a + b) / diff.length;
+    final activityDiff = diff.map((v) => pow(v - meanDiff, 2).toDouble()).reduce((a, b) => a + b) / diff.length;
 
     final mobility = activity > 1e-9 ? sqrt(activityDiff / activity) : 0.0;
 
@@ -135,6 +137,9 @@ class EEGAnalyzerApp extends StatelessWidget {
             elevation: 0,
           )
       ),
+      routes: {
+        '/educational': (context) => const BrainDemoPage(),
+      },
       home: const EEGHome(),
     );
   }
@@ -397,6 +402,11 @@ class _EEGHomeState extends State<EEGHome> with SingleTickerProviderStateMixin {
               minYRange = -3.0;
             }),
             tooltip: 'Reset Signal Zoom',
+          ),
+          IconButton(
+            icon: const Icon(Icons.school_outlined, color: Colors.white70),
+            onPressed: () => Navigator.pushNamed(context, '/educational'),
+            tooltip: 'Educational Brain Demo',
           ),
           const SizedBox(width: 8),
         ],
@@ -915,4 +925,669 @@ class _EEGHomeState extends State<EEGHome> with SingleTickerProviderStateMixin {
       ),
     );
   }
+}
+
+class BrainDemoPage extends StatefulWidget {
+  const BrainDemoPage({super.key});
+  @override
+  State<BrainDemoPage> createState() => _BrainDemoPageState();
+}
+
+class _BrainDemoPageState extends State<BrainDemoPage> {
+  bool bipolar = true;
+  double zoom = 1.0;
+  double rotX = 0.0;
+  double rotY = 0.0;
+  double rotZ = 0.0;
+  double _startZoom = 1.0;
+  bool showLabels = true;
+  final GlobalKey _paintKey = GlobalKey();
+  String? highlightedElectrode;
+
+  final Map<String, String> learnTopics = {
+    'Cortex & Folding': 'Short summary: The cortex is highly folded (gyri/sulci) to maximize surface area. Folds reflect functional organisation and are key to EEG source geometry.',
+    'EEG Bands': 'Alpha (8–13Hz) often linked to relaxation, Beta (13–30Hz) to alertness, Theta (4–8Hz) to drowsiness, Delta (0.5–4Hz) to deep sleep.',
+    'Montages': 'Bipolar connects adjacent electrodes emphasizing phase differences. Referential references all electrodes to a common point (e.g., Cz) emphasizing amplitude distribution.',
+    'Artifacts': 'Common artifacts include eye blinks, muscle (EMG) and line noise. Recognising them is crucial before interpretation.',
+  };
+
+  Map<String, Offset> _computeProjectedElectrodes(Size size) {
+    final center = size.center(Offset.zero);
+    final baseR = min(size.width, size.height) * 0.36 * zoom;
+    final focal = baseR * 3.2;
+    final ellA = baseR * 0.9;
+    final ellB = baseR * 0.76;
+    final ellC = baseR * 0.55;
+    Map<String, Offset3D> electrodeLocal = {
+      'Fp1': const Offset3D(-0.62, -0.78, 0.0),
+      'Fp2': const Offset3D(0.62, -0.78, 0.0),
+      'F3': const Offset3D(-0.42, -0.42, 0.0),
+      'F4': const Offset3D(0.42, -0.42, 0.0),
+      'C3': const Offset3D(-0.48, 0.05, 0.0),
+      'C4': const Offset3D(0.48, 0.05, 0.0),
+      'P3': const Offset3D(-0.42, 0.5, 0.0),
+      'P4': const Offset3D(0.42, 0.5, 0.0),
+      'O1': const Offset3D(-0.62, 0.82, 0.0),
+      'O2': const Offset3D(0.62, 0.82, 0.0),
+      'Cz': const Offset3D(0.0, 0.08, 0.0),
+    };
+
+    Offset3D rotate3d(Offset3D p, double ax, double ay, double az) {
+      double x = p.x, y = p.y, z = p.z;
+      double cosX = cos(ax), sinX = sin(ax);
+      double cosY = cos(ay), sinY = sin(ay);
+      double cosZ = cos(az), sinZ = sin(az);
+      double y1 = y * cosX - z * sinX;
+      double z1 = y * sinX + z * cosX;
+      double x2 = x * cosY + z1 * sinY;
+      double z2 = -x * sinY + z1 * cosY;
+      double x3 = x2 * cosZ - y1 * sinZ;
+      double y3 = x2 * sinZ + y1 * cosZ;
+      return Offset3D(x3, y3, z2);
+    }
+
+    Offset project(Offset3D p) {
+      final double z = p.z + focal;
+      final double k = z.abs() < 1e-6 ? 1.0 : focal / z;
+      return center + Offset(p.x * k, p.y * k);
+    }
+
+    final Map<String, Offset> projected = {};
+    electrodeLocal.forEach((k, v) {
+      final nx = v.x;
+      final ny = v.y;
+      final inside = 1 - (nx * nx) - (ny * ny);
+      final nz = inside > 0 ? sqrt(inside) : 0.0;
+      final vx = nx * ellA;
+      final vy = ny * ellB;
+      final vz = nz * ellC;
+      final rotated = rotate3d(Offset3D(vx, vy, vz), rotX, rotY, rotZ);
+      projected[k] = project(rotated);
+    });
+    return projected;
+  }
+
+  void _handleTapDown(TapDownDetails details) {
+    final RenderBox? box = _paintKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final local = box.globalToLocal(details.globalPosition);
+    final size = box.size;
+    final proj = _computeProjectedElectrodes(size);
+    String? nearest;
+    double bestDist = double.infinity;
+    proj.forEach((k, v) {
+      final d = (v - local).distance;
+      if (d < bestDist) {
+        bestDist = d;
+        nearest = k;
+      }
+    });
+    if (nearest != null && bestDist < 28.0) {
+      setState(() => highlightedElectrode = nearest);
+      _showElectrodeInfo(nearest!, proj[nearest]!);
+    } else {
+      setState(() => highlightedElectrode = null);
+    }
+  }
+
+  void _showElectrodeInfo(String label, Offset pos) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Theme.of(context).cardColor,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      builder: (_) {
+        return Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              Text('Electrode: $label', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF00FFFF))),
+              TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Close', style: TextStyle(color: Colors.white70))),
+            ]),
+            const SizedBox(height: 8),
+            Text('Position: ${pos.dx.toStringAsFixed(0)}, ${pos.dy.toStringAsFixed(0)}', style: const TextStyle(color: Colors.white70)),
+            const SizedBox(height: 8),
+            const Text('Quick Notes:', style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 6),
+            Text(
+              label == 'Cz'
+                  ? 'Central reference point. Useful as a referential anchor.'
+                  : 'Located on the scalp surface. Connects to adjacent electrodes in bipolar montage.',
+              style: const TextStyle(color: Colors.white70),
+            ),
+            const SizedBox(height: 12),
+            ElevatedButton.icon(
+              icon: const Icon(Icons.school),
+              label: const Text('Learn more (topics)'),
+              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00FFFF)),
+              onPressed: () {
+                Navigator.of(context).pop();
+                _openTopic('Montages');
+              },
+            ),
+          ]),
+        );
+      },
+    );
+  }
+
+  void _openTopic(String key) {
+    final content = learnTopics[key] ?? 'Topic not found';
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: Theme.of(context).cardColor,
+        title: Text(key, style: const TextStyle(color: Color(0xFF00FFFF))),
+        content: Text(content, style: const TextStyle(color: Colors.white70)),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Close', style: TextStyle(color: Color(0xFFFF00FF)))),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(bipolar ? 'Bipolar Montage' : 'Referential Montage'),
+        actions: [
+          Row(children: [
+            const Text('Labels', style: TextStyle(fontSize: 12)),
+            Switch(value: showLabels, onChanged: (v) => setState(() => showLabels = v)),
+            IconButton(
+              icon: const Icon(Icons.info_outline),
+              onPressed: () {
+                showDialog(context: context, builder: (_) => AlertDialog(
+                  backgroundColor: Theme.of(context).cardColor,
+                  title: const Text('LearnEEG Guide', style: TextStyle(color: Color(0xFF00FFFF))),
+                  content: SingleChildScrollView(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    const Text('Quick guided topics inspired by LearnEEG:', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    ...learnTopics.entries.map((e) => Padding(padding: const EdgeInsets.symmetric(vertical:4), child: Text('• ${e.key}: ${e.value}', style: const TextStyle(color: Colors.white70)))),
+                  ])),
+                  actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Close'))],
+                ));
+              },
+            ),
+          ]),
+          Switch(
+            value: bipolar,
+            onChanged: (v) => setState(() => bipolar = v),
+          )
+        ],
+      ),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final paintSize = Size(min(420.0, constraints.maxWidth * 0.66), min(420.0, constraints.maxHeight * 0.85));
+          final proj = _computeProjectedElectrodes(paintSize);
+          return Row(children: [
+            Expanded(
+              flex: 3,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Card(
+                  color: Theme.of(context).cardColor,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  child: Stack(children: [
+                    Positioned.fill(
+                      child: Center(
+                        child: GestureDetector(
+                          onTapDown: _handleTapDown,
+                          child: Container(
+                            key: _paintKey,
+                            width: paintSize.width,
+                            height: paintSize.height,
+                            alignment: Alignment.center,
+                            child: CustomPaint(
+                              size: paintSize,
+                              painter: BrainPainter(bipolar: bipolar, rotX: rotX, rotY: rotY, rotZ: rotZ, zoom: zoom),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    if (showLabels)
+                      ...proj.entries.map((e) {
+                        final p = e.value;
+                        return Positioned(
+                          left: p.dx - 18,
+                          top: p.dy - 18,
+                          child: IgnorePointer(
+                            child: Column(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal:6, vertical:2),
+                                  decoration: BoxDecoration(color: highlightedElectrode == e.key ? const Color(0xFF00FFFF) : Colors.black.withOpacity(0.5), borderRadius: BorderRadius.circular(6)),
+                                  child: Text(e.key, style: const TextStyle(fontSize: 10, color: Colors.white)),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    Positioned(
+                      left: 12,
+                      top: 12,
+                      child: Card(
+                        color: Colors.black.withOpacity(0.45),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal:8, vertical:6),
+                          child: Row(children: [
+                            const Icon(Icons.touch_app, size: 14, color: Colors.white70),
+                            const SizedBox(width:6),
+                            Text('Tap electrodes for info', style: TextStyle(color: Colors.white70, fontSize: 12)),
+                          ]),
+                        ),
+                      ),
+                    ),
+                  ]),
+                ),
+              ),
+            ),
+            Expanded(
+              flex: 2,
+              child: Padding(
+                padding: const EdgeInsets.only(right:12.0, top:12, bottom:12),
+                child: Column(
+                  children: [
+                    Card(
+                      color: const Color(0xFF080820),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12.0),
+                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          const Text('LearnEEG Topics', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Color(0xFF00FFFF))),
+                          const SizedBox(height: 8),
+                          ...learnTopics.keys.map((k) => ListTile(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            title: Text(k, style: const TextStyle(color: Colors.white70)),
+                            trailing: IconButton(icon: const Icon(Icons.open_in_new, color: Colors.white70, size: 18), onPressed: () => _openTopic(k)),
+                          )),
+                        ]),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Card(
+                      color: const Color(0xFF0E0E1A),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      child: Padding(
+                        padding: const EdgeInsets.all(12.0),
+                        child: Column(children: [
+                          const Text('Visualization Controls', style: TextStyle(fontWeight: FontWeight.bold)),
+                          const SizedBox(height:8),
+                          Row(children: [
+                            const Text('Zoom', style: TextStyle(color: Colors.white70)),
+                            Expanded(child: Slider(min:0.6, max:2.5, value: zoom, onChanged: (v) => setState(()=>zoom=v))),
+                          ]),
+                          Row(children: [
+                            const Text('Rotation X', style: TextStyle(color: Colors.white70)),
+                            Expanded(child: Slider(min:-pi/2, max:pi/2, value: rotX, onChanged: (v) => setState(()=>rotX=v))),
+                          ]),
+                          Row(children: [
+                            const Text('Rotation Y', style: TextStyle(color: Colors.white70)),
+                            Expanded(child: Slider(min:-pi/2, max:pi/2, value: rotY, onChanged: (v) => setState(()=>rotY=v))),
+                          ]),
+                          Row(children: [
+                            const Text('Rotation Z', style: TextStyle(color: Colors.white70)),
+                            Expanded(child: Slider(min:-pi, max:pi, value: rotZ, onChanged: (v) => setState(()=>rotZ=v))),
+                          ]),
+                          const SizedBox(height:8),
+                          ElevatedButton.icon(
+                            icon: const Icon(Icons.refresh),
+                            label: const Text('Reset View'),
+                            onPressed: () => setState(() { rotX = rotY = rotZ = 0.0; zoom = 1.0; }),
+                            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF00FFFF)),
+                          ),
+                        ]),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            )
+          ]);
+        },
+      ),
+    );
+  }
+}
+
+class BrainPainter extends CustomPainter {
+  final bool bipolar;
+  final double rotX;
+  final double rotY;
+  final double rotZ;
+  final double zoom;
+  BrainPainter({
+    required this.bipolar,
+    required this.rotX,
+    required this.rotY,
+    required this.rotZ,
+    required this.zoom,
+  });
+
+  Offset _project(Offset3D p, Offset center, double focal) {
+    final double z = p.z + focal;
+    final double k = z.abs() < 1e-6 ? 1.0 : focal / z;
+    return center + Offset(p.x * k, p.y * k);
+  }
+
+  Offset3D _rotate(Offset3D p, double ax, double ay, double az) {
+    double x = p.x, y = p.y, z = p.z;
+    double cosX = cos(ax), sinX = sin(ax);
+    double cosY = cos(ay), sinY = sin(ay);
+    double cosZ = cos(az), sinZ = sin(az);
+    double y1 = y * cosX - z * sinX;
+    double z1 = y * sinX + z * cosX;
+    double x2 = x * cosY + z1 * sinY;
+    double z2 = -x * sinY + z1 * cosY;
+    double x3 = x2 * cosZ - y1 * sinZ;
+    double y3 = x2 * sinZ + y1 * cosZ;
+    return Offset3D(x3, y3, z2);
+  }
+
+  List<String> _labelsOrderByDepth(Map<String, Offset3D> pts) {
+    final list = pts.entries.toList();
+    list.sort((a, b) => b.value.z.compareTo(a.value.z));
+    return list.map((e) => e.key).toList();
+  }
+
+  void _drawHemisphereMesh(Canvas canvas, Offset center, double ellA, double ellB, double ellC,
+      double rotX, double rotY, double rotZ, bool left, Color fillBase) {
+    final int lat = 18;
+    final int lon = 48;
+    final focal = ellA * 3.2;
+    final meshPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.9
+      ..color = fillBase.withOpacity(0.85)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6);
+
+    for (int r = 0; r < lat; r++) {
+      final t = r / (lat - 1);
+      final y = lerpDouble(0.95, -0.95, t)!;
+      final ring = sqrt(max(0.0, 1 - y * y));
+      final path = Path();
+      for (int s = 0; s <= lon; s++) {
+        final theta = (s / lon) * pi;
+        final fold = 0.08 * sin(theta * 6 + t * 6 + rotY * 2.0) * (0.9 - t) * 0.9;
+        final xNorm = cos(theta) * (ring + fold) * (left ? -1.0 : 1.0);
+        final zNorm = sin(theta) * (ring + fold);
+        final vx = xNorm * ellA;
+        final vy = y * ellB;
+        final vz = zNorm * ellC;
+        final rotated = _rotate(Offset3D(vx, vy, vz), rotX, rotY + (left ? -0.06 : 0.06), rotZ * 0.6);
+        final p = _project(rotated, center, focal);
+        if (s == 0) path.moveTo(p.dx, p.dy);
+        else path.lineTo(p.dx, p.dy);
+      }
+      canvas.drawPath(path, meshPaint);
+    }
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = size.center(Offset.zero);
+    final baseR = min(size.width, size.height) * 0.36 * zoom;
+    final focal = baseR * 3.2;
+    final ellA = baseR * 0.9;
+    final ellB = baseR * 0.76;
+    final ellC = baseR * 0.55;
+
+    final bg = Rect.fromLTWH(0, 0, size.width, size.height);
+    final Paint bgPaint = Paint()
+      ..shader = RadialGradient(
+        colors: [const Color(0xFF060217), const Color(0xFF0B0530)],
+        center: Alignment(0.0, -0.25),
+        radius: 1.0,
+      ).createShader(bg);
+    canvas.drawRect(bg, bgPaint);
+
+    if (bipolar) {
+      final meshBase = Colors.cyanAccent;
+      _drawHemisphereMesh(canvas, center, ellA, ellB, ellC, rotX, rotY, rotZ, true, meshBase);
+      _drawHemisphereMesh(canvas, center, ellA, ellB, ellC, rotX, rotY, rotZ, false, meshBase);
+
+      final nodes = <Offset>[];
+      final nodes3 = <Offset3D>[];
+      for (int i = 2; i < 16; i += 2) {
+        final phi = lerpDouble(-pi / 2, pi / 2, i / 16)!;
+        final yNorm = sin(phi);
+        final ring = sqrt(max(0.0, 1 - yNorm * yNorm));
+        for (int j = 0; j < 40; j += 3) {
+          final theta = (j / 40) * 2 * pi;
+          final fold = 0.08 * sin(theta * 4 + i * 0.8 + rotY * 2.0);
+          final xNorm = cos(theta) * (ring + fold);
+          final zNorm = sin(theta) * (ring + fold);
+          final vx = xNorm * ellA;
+          final vy = yNorm * ellB * 1.02;
+          final vz = zNorm * ellC;
+          final r = _rotate(Offset3D(vx, vy, vz), rotX, rotY, rotZ);
+          nodes3.add(r);
+          nodes.add(_project(r, center, focal));
+        }
+      }
+
+      final glow = Paint()..color = Colors.blueAccent.withOpacity(0.12)..maskFilter = const MaskFilter.blur(BlurStyle.normal, 14);
+      final core = Paint()..color = Colors.lightBlueAccent;
+      for (int k = 0; k < nodes.length; k++) {
+        canvas.drawCircle(nodes[k], 10.0 * (0.5 + (k % 3) * 0.12), glow);
+        canvas.drawCircle(nodes[k], 3.5, core);
+      }
+
+      final conn = Paint()
+        ..strokeWidth = 0.9
+        ..style = PaintingStyle.stroke
+        ..color = Colors.cyanAccent.withOpacity(0.12);
+      for (int a = 0; a < nodes3.length; a++) {
+        for (int b = a + 1; b < nodes3.length; b++) {
+          final d3 = sqrt(pow(nodes3[a].x - nodes3[b].x, 2) + pow(nodes3[a].y - nodes3[b].y, 2) + pow(nodes3[a].z - nodes3[b].z, 2));
+          if (d3 < baseR * 0.36) {
+            final pa = _project(nodes3[a], center, focal);
+            final pb = _project(nodes3[b], center, focal);
+            conn.color = Colors.cyanAccent.withOpacity((1.0 - d3 / (baseR * 0.36)).clamp(0.05, 0.4));
+            canvas.drawLine(pa, pb, conn);
+          }
+        }
+      }
+    } else {
+      final meshBase = Colors.deepPurpleAccent;
+      _drawHemisphereMesh(canvas, center, ellA, ellB, ellC, rotX * 0.9, rotY * 0.9, rotZ * 0.9, true, meshBase);
+      _drawHemisphereMesh(canvas, center, ellA, ellB, ellC, rotX * 0.9, rotY * 0.9, rotZ * 0.9, false, meshBase);
+
+      final nodes = <Offset>[];
+      final nodes3 = <Offset3D>[];
+      for (int i = 2; i < 16; i += 3) {
+        final phi = lerpDouble(-pi / 2, pi / 2, i / 16)!;
+        final yNorm = sin(phi);
+        final ring = sqrt(max(0.0, 1 - yNorm * yNorm));
+        for (int j = 0; j < 36; j += 4) {
+          final theta = (j / 36) * 2 * pi;
+          final fold = 0.06 * sin(theta * 4 + i * 0.6 + rotY * 1.6);
+          final xNorm = cos(theta) * (ring + fold);
+          final zNorm = sin(theta) * (ring + fold);
+          final vx = xNorm * ellA;
+          final vy = yNorm * ellB * 1.01;
+          final vz = zNorm * ellC;
+          final r = _rotate(Offset3D(vx, vy, vz), rotX * 0.9, rotY * 0.9, rotZ * 0.7);
+          nodes3.add(r);
+          nodes.add(_project(r, center, focal));
+        }
+      }
+
+      final glow = Paint()..color = Colors.purpleAccent.withOpacity(0.12)..maskFilter = const MaskFilter.blur(BlurStyle.normal, 14);
+      final core = Paint()..color = Colors.deepPurpleAccent;
+      for (int k = 0; k < nodes.length; k++) {
+        canvas.drawCircle(nodes[k], 10.0 * (0.5 + (k % 3) * 0.12), glow);
+        canvas.drawCircle(nodes[k], 3.5, core);
+      }
+
+      final conn = Paint()
+        ..strokeWidth = 0.9
+        ..style = PaintingStyle.stroke
+        ..color = Colors.purpleAccent.withOpacity(0.12);
+      for (int a = 0; a < nodes3.length; a++) {
+        for (int b = a + 1; b < nodes3.length; b++) {
+          final d3 = sqrt(pow(nodes3[a].x - nodes3[b].x, 2) + pow(nodes3[a].y - nodes3[b].y, 2) + pow(nodes3[a].z - nodes3[b].z, 2));
+          if (d3 < baseR * 0.36) {
+            final pa = _project(nodes3[a], center, focal);
+            final pb = _project(nodes3[b], center, focal);
+            conn.color = Colors.purpleAccent.withOpacity((1.0 - d3 / (baseR * 0.36)).clamp(0.04, 0.36));
+            canvas.drawLine(pa, pb, conn);
+          }
+        }
+      }
+    }
+
+    // electrodes projection and labels
+    final Map<String, Offset3D> electrodeLocal = {
+      'Fp1': Offset3D(-0.62, -0.78, 0.0),
+      'Fp2': Offset3D(0.62, -0.78, 0.0),
+      'F3': Offset3D(-0.42, -0.42, 0.0),
+      'F4': Offset3D(0.42, -0.42, 0.0),
+      'C3': Offset3D(-0.48, 0.05, 0.0),
+      'C4': Offset3D(0.48, 0.05, 0.0),
+      'P3': Offset3D(-0.42, 0.5, 0.0),
+      'P4': Offset3D(0.42, 0.5, 0.0),
+      'O1': Offset3D(-0.62, 0.82, 0.0),
+      'O2': Offset3D(0.62, 0.82, 0.0),
+      'Cz': Offset3D(0.0, 0.08, 0.0),
+    };
+
+    final Map<String, Offset3D> rotated = {};
+    electrodeLocal.forEach((k, v) {
+      final nx = v.x;
+      final ny = v.y;
+      final inside = 1 - (nx * nx) - (ny * ny);
+      final nz = inside > 0 ? sqrt(inside) : 0.0;
+      final vx = nx * ellA;
+      final vy = ny * ellB;
+      final vz = nz * ellC;
+      rotated[k] = _rotate(Offset3D(vx, vy, vz), rotX, rotY, rotZ);
+    });
+
+    final projected = <String, Offset>{};
+    rotated.forEach((k, v) {
+      projected[k] = _project(v, center, focal);
+    });
+
+    // bipolar montage connections
+    if (bipolar && projected.isNotEmpty) {
+      final chains = [
+        ['Fp1', 'F3', 'C3', 'P3', 'O1'],
+        ['Fp2', 'F4', 'C4', 'P4', 'O2'],
+      ];
+      final connectionPaint = Paint()
+        ..strokeWidth = 1.4
+        ..style = PaintingStyle.stroke;
+      for (var chain in chains) {
+        for (int i = 0; i < chain.length - 1; i++) {
+          final aKey = chain[i];
+          final bKey = chain[i + 1];
+          if (!projected.containsKey(aKey) || !projected.containsKey(bKey)) continue;
+          final pa = projected[aKey]!;
+          final pb = projected[bKey]!;
+          final ra = rotated[aKey]!;
+          final rb = rotated[bKey]!;
+          final depthFactor = (((ra.z + rb.z) / 2) / (ellC * 0.6)).clamp(-1.0, 1.0);
+          connectionPaint.color = Colors.cyanAccent.withOpacity((0.85 - depthFactor * 0.4).clamp(0.2, 0.95));
+          canvas.drawLine(pa, pb, connectionPaint);
+        }
+      }
+    }
+
+    // draw referential electrode->Cz connections (keep montage logic)
+    if (!bipolar && projected.containsKey('Cz')) {
+      final connectionPaint = Paint()
+        ..strokeWidth = 1.2
+        ..style = PaintingStyle.stroke
+        ..color = Colors.orangeAccent.withOpacity(0.9);
+      projected.forEach((k, p) {
+        if (k != 'Cz') {
+          canvas.drawLine(p, projected['Cz']!, connectionPaint);
+        }
+      });
+    }
+
+    final order = _labelsOrderByDepth(rotated);
+
+    for (final label in order) {
+      final pos3 = rotated[label]!;
+      final pos = projected[label]!;
+      final depthNorm = ((pos3.z + ellC) / (ellC * 2)).clamp(0.0, 1.0);
+      final glow = Paint()
+        ..color = Colors.white.withOpacity(0.06 + depthNorm * 0.24)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8);
+      canvas.drawCircle(pos, lerpDouble(8, 14, depthNorm)!, glow);
+      final Paint electrodePaint = Paint()..color = Color.lerp(Colors.black, Colors.deepPurple.shade900, depthNorm)!;
+      canvas.drawCircle(pos, lerpDouble(4.5, 7.5, depthNorm)!, electrodePaint);
+
+      final tp = TextPainter(
+        text: TextSpan(text: label, style: TextStyle(fontSize: 11, color: Colors.white.withOpacity(0.95 - depthNorm * 0.6), fontWeight: FontWeight.w700)),
+        textDirection: TextDirection.ltr,
+      );
+      tp.layout();
+      final labelOffset = Offset(12 * (pos3.x >= 0 ? 1 : -1), -12);
+      tp.paint(canvas, pos + labelOffset);
+    }
+
+    final hintPainter = TextPainter(
+      text: TextSpan(
+        text: 'Rotate • Pinch to zoom • Double-tap to reset',
+        style: TextStyle(fontSize: 11, color: Colors.white.withOpacity(0.75)),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    hintPainter.layout();
+    hintPainter.paint(canvas, center + Offset(-hintPainter.width / 2, baseR + 28));
+  }
+
+  void _drawHemisphereSurface(Canvas canvas, Offset centerLocal, double a, double b, double c, bool left) {
+    final int lat = 20;
+    final int lon = 40;
+    final focal = a * 3.2;
+    final foldPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.8
+      ..color = Colors.white.withOpacity(0.06);
+
+    for (int r = 0; r <= lat; r++) {
+      final t = r / lat;
+      final phi = lerpDouble(-pi / 2, pi / 2, t)!;
+      final yNorm = sin(phi);
+      final ring = sqrt(max(0.0, 1 - yNorm * yNorm));
+      final path = Path();
+      for (int s = 0; s <= lon; s++) {
+        final theta = (s / lon) * pi;
+        final fold = 0.06 * sin(theta * 5 + t * 6.0) * (1.0 - t);
+        final xNorm = cos(theta) * (ring + fold) * (left ? -1 : 1);
+        final zNorm = sin(theta) * (ring + fold);
+        final vx = xNorm * a;
+        final vy = yNorm * b;
+        final vz = zNorm * c;
+        final rotated = _rotate(Offset3D(vx, vy, vz), rotX * 0.5, rotY * 0.6, rotZ * 0.4);
+        final p = _project(rotated, centerLocal + Offset(0, 0), a * 3.2);
+        if (s == 0) path.moveTo(p.dx, p.dy);
+        else path.lineTo(p.dx, p.dy);
+      }
+      canvas.drawPath(path, foldPaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant BrainPainter oldDelegate) {
+    return oldDelegate.rotX != rotX ||
+        oldDelegate.rotY != rotY ||
+        oldDelegate.rotZ != rotZ ||
+        oldDelegate.zoom != zoom ||
+        oldDelegate.bipolar != bipolar;
+  }
+}
+
+class Offset3D {
+  final double x;
+  final double y;
+  final double z;
+  const Offset3D(this.x, this.y, this.z);
 }
