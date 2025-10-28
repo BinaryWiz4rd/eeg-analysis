@@ -1,6 +1,10 @@
 import 'dart:async';
 import 'dart:math';
 import 'dart:ui' show lerpDouble;
+import 'dart:convert';
+import 'dart:io' show Platform, File;
+import 'package:path_provider/path_provider.dart';
+import 'package:http/http.dart' as http;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
@@ -177,9 +181,12 @@ class _EEGHomeState extends State<EEGHome> with SingleTickerProviderStateMixin {
   int powerHistoryIndex = 0;
   double alphaZScore = 0.0;
 
+  String? _openAiApiKey;
+
   @override
   void initState() {
     super.initState();
+    _loadApiKey(); // load saved API key
     for (int i = 0; i < bufferLength; i++) {
       final t = i / sampleRate;
       _buffer[i] = SignalProcessor.generateSample(t);
@@ -188,6 +195,66 @@ class _EEGHomeState extends State<EEGHome> with SingleTickerProviderStateMixin {
     }
     _startRealtime();
     _updateAnalysis();
+  }
+
+  Future<File> _apiKeyFile() async {
+    final dir = await getApplicationDocumentsDirectory();
+    return File('${dir.path}/.openai_api_key');
+  }
+
+  Future<void> _saveApiKey(String key) async {
+    try {
+      final f = await _apiKeyFile();
+      await f.writeAsString(key.trim(), flush: true);
+      setState(() => _openAiApiKey = key.trim());
+    } catch (_) {}
+  }
+
+  Future<void> _loadApiKey() async {
+    try {
+      final f = await _apiKeyFile();
+      if (await f.exists()) {
+        final key = (await f.readAsString()).trim();
+        if (key.isNotEmpty) setState(() => _openAiApiKey = key);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _clearApiKey() async {
+    try {
+      final f = await _apiKeyFile();
+      if (await f.exists()) await f.delete();
+    } catch (_) {}
+    setState(() => _openAiApiKey = null);
+  }
+
+  Future<void> _promptForApiKey() async {
+    final controller = TextEditingController(text: _openAiApiKey ?? '');
+    await showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text('OpenAI API Key'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Paste your OpenAI API key (sk-...) here. It will be stored locally.'),
+              const SizedBox(height: 8),
+              TextField(
+                controller: controller,
+                obscureText: true,
+                decoration: const InputDecoration(hintText: 'sk-...'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () { Navigator.of(ctx).pop(); }, child: const Text('Cancel')),
+            TextButton(onPressed: () { _clearApiKey(); Navigator.of(ctx).pop(); }, child: const Text('Clear')),
+            ElevatedButton(onPressed: () { _saveApiKey(controller.text); Navigator.of(ctx).pop(); }, child: const Text('Save')),
+          ],
+        );
+      },
+    );
   }
 
   void _startRealtime() {
@@ -332,6 +399,67 @@ class _EEGHomeState extends State<EEGHome> with SingleTickerProviderStateMixin {
     );
   }
 
+  Future<String> _callOpenAI(String prompt) async {
+    final apiKey = (_openAiApiKey != null && _openAiApiKey!.isNotEmpty)
+        ? _openAiApiKey!
+        : (Platform.environment['OPENAI_API_KEY'] ?? '');
+    if (apiKey.isEmpty) {
+      throw Exception('OpenAI API key not set. Either set the OPENAI_API_KEY environment variable or open Settings (key icon) in the app and paste your key.');
+    }
+    final uri = Uri.parse('https://api.openai.com/v1/chat/completions');
+    final body = {
+      'model': 'gpt-4o-mini',
+      'messages': [
+        {'role': 'system', 'content': 'You are an expert EEG analyst. Provide concise clinical-style interpretation and recommended preprocessing steps.'},
+        {'role': 'user', 'content': prompt}
+      ],
+      'max_tokens': 700,
+      'temperature': 0.2,
+    };
+    final resp = await http.post(uri, headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer $apiKey'
+    }, body: jsonEncode(body));
+    if (resp.statusCode == 200) {
+      final j = jsonDecode(resp.body);
+      final choice = j['choices']?[0];
+      final content = choice?['message']?['content'] ?? choice?['text'] ?? '';
+      return content.toString();
+    } else {
+      throw Exception('OpenAI error ${resp.statusCode}: ${resp.body}');
+    }
+  }
+
+  Future<void> _performAIAnalysis() async {
+    final view = _viewBuffer();
+    final spectrum = SignalProcessor.spectrumFromBuffer(view);
+    final fftSize = 1 << ((log(view.length) / log(2)).ceil());
+    final features = {
+      'alphaPeakFreq': alphaPeakFreq,
+      'alphaPeakPower': alphaPeakPower,
+      'activity': activity,
+      'mobility': mobility,
+      'alphaZScore': alphaZScore,
+      'recentAlphaMean': recentAlphaPowers.reduce((a, b) => a + b) / recentAlphaPowers.length,
+    };
+    final snippet = view.sublist(max(0, view.length - 256));
+    final prompt = StringBuffer();
+    prompt.writeln('Provide a concise EEG interpretation and practical recommendations.');
+    prompt.writeln('Features: ${jsonEncode(features)}');
+    prompt.writeln('Short time-domain snippet (last 256 samples) stats: mean=${(snippet.reduce((a,b)=>a+b)/snippet.length).toStringAsFixed(4)}, rms=${(sqrt(snippet.map((v)=>v*v).reduce((a,b)=>a+b)/snippet.length)).toStringAsFixed(4)}');
+    prompt.writeln('Notes: mention likely artifacts, preprocessing suggestions (filtering, notch, ICA), and a short summary line for clinicians.');
+    String aiText = '';
+    showDialog(context: context, barrierDismissible: false, builder: (_) => const Center(child: CircularProgressIndicator()));
+    try {
+      aiText = await _callOpenAI(prompt.toString());
+      if (mounted) Navigator.of(context).pop();
+      _showAnalysisDialog(aiText);
+    } catch (e) {
+      if (mounted) Navigator.of(context).pop();
+      _showAnalysisDialog('AI request failed: $e\n\nFallback local summary:\n\n${analysisSummary.replaceAll("### ", "").replaceAll("**", "")}');
+    }
+  }
+
   @override
   void dispose() {
     _timer?.cancel();
@@ -408,6 +536,11 @@ class _EEGHomeState extends State<EEGHome> with SingleTickerProviderStateMixin {
             onPressed: () => Navigator.pushNamed(context, '/educational'),
             tooltip: 'Educational Brain Demo',
           ),
+          IconButton(
+            icon: const Icon(Icons.vpn_key, color: Colors.white70),
+            tooltip: 'OpenAI API Key',
+            onPressed: _promptForApiKey,
+          ),
           const SizedBox(width: 8),
         ],
       ),
@@ -467,7 +600,7 @@ class _EEGHomeState extends State<EEGHome> with SingleTickerProviderStateMixin {
               _buildActionButton(
                 'AI Analysis', Icons.insights,
                 Theme.of(context).colorScheme.secondary,
-                _generateAnalysisSummary,
+                () => _performAIAnalysis(),
               ),
             ],
           ),
@@ -1495,10 +1628,7 @@ class BrainPainter extends CustomPainter {
           canvas.drawLine(pa, pb, connectionPaint);
         }
       }
-    }
-
-    // draw referential electrode->Cz connections (keep montage logic)
-    if (!bipolar && projected.containsKey('Cz')) {
+    } else {
       final connectionPaint = Paint()
         ..strokeWidth = 1.2
         ..style = PaintingStyle.stroke
