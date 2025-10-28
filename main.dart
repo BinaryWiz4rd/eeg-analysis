@@ -201,3 +201,4 @@ class _EEGAnalyzerHomeState extends State<EEGAnalyzerHome> {
     );
   }
 }
+
