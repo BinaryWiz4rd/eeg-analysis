@@ -1,80 +1,97 @@
-# EEG Realtime Console 🧠
+# EEG Realtime Console — Flutter (Individual Project for Cross-Platform Mobile App Development course)
 
-This is a comprehensive **Flutter** application designed to simulate and visualize real-time Electroencephalography (EEG) data. It functions as a dynamic dashboard, offering immediate signal visualization alongside advanced spectral and statistical analysis, including a simulated AI interpretation of the brain state.
+A compact Flutter application that simulates, analyses, and visualises EEG-like signals in real time.
 
-## ✨ Features
-
-The application is structured as a high-contrast, scientific console for easy monitoring and analysis.
-
-### 📊 Realtime Visualization
-* **Raw EEG Plot:** Displays a live-scrolling plot of the simulated EEG signal over a 2-second window.
-* **Signal Controls:** Adjustable **Speed** (sampling rate factor) and **Gain** (amplitude scaling) to explore signal dynamics.
-* **Adaptive Y-Axis:** The signal plot's vertical range dynamically adjusts to the signal's peak amplitude.
+This repo provides a dark-themed dashboard with a synthetic EEG generator (alpha + theta + noise), a frequency-domain FFT spectrum, simple band-power metrics, an educational brain demo, and an integrated "AI Analysis" feature that can produce a concise interpretation using OpenAI.
 
 ---
 
-### 🔬 Advanced Analysis Panel
-The dedicated analysis panel offers multiple views for in-depth signal investigation:
+## Quick summary
 
-| View | Description | Key Insight |
-| :--- | :--- | :--- |
-| **Signal Detail** | A zoomed-in view of the last 0.5 seconds of the raw signal. | Fine structure and noise identification. |
-| **Spectrum** | Magnitude of the Fast Fourier Transform (FFT) across frequencies. | Shows which specific frequencies (e.g., 10 Hz Alpha) are strongest. |
-| **PSD (Power Spectral Density)** | A smoothed, density-normalized version of the power spectrum. | Better visualization of total power distribution per frequency band. |
-| **Bands (Radar Chart)** | Visualizes the power distribution across the four classical EEG bands (Delta, Theta, Alpha, Beta). | Quick comparison of dominant brain state activity. |
-| **Stats/Hjorth** | Displays core time-domain and frequency metrics, including the **Alpha Z-Score**. | Quantifies signal stability and rhythmic prominence. |
+- Framework: Flutter (Dart)
+- Purpose: Simulate an EEG signal, compute FFT and band power, and show interactive charts on a single-screen dashboard.
+- Key features: raw time-series plot, FFT magnitude spectrum, band-power cards (Delta/Theta/Alpha/Beta), a LearnEEG educational demo, and an "AI Analysis" assistant for short automated interpretation.
 
 ---
 
-### 🤖 Simulated AI Interpretation
-A key feature is the **"AI Analysis"** button, which generates a written summary of the current signal state based on real-time metrics:
+## AI Analysis (what it does and how to use it)
 
-* It uses **rule-based logic** tied to the **Alpha Z-Score**, Hjorth **Activity** (variance), and Hjorth **Mobility** (mean frequency).
-* It provides a plain-language summary of whether the signal indicates a state of relaxation (high Alpha) or alertness (low Alpha) and comments on the signal quality (noisy vs. rhythmic).
+The app includes a built-in AI-based interpretation helper:
 
----
+- Trigger: Press the "AI Analysis" button in the right-hand action panel.
+- What it sends: a small JSON-like prompt containing summary features (alpha peak frequency & power, Hjorth activity/mobility, alpha Z-score, and short time-domain statistics for the last 256 samples).
+- Remote model: the app calls the OpenAI Chat Completions endpoint (`/v1/chat/completions`) and expects a chat-style response. The model string is currently configurable in the code.
+- Fallback: if the network call fails or no API key is configured, the app displays a deterministic local summary (rule-based analysis) so the feature still produces useful output.
 
-## 🛠️ Technology Stack
+How to provide an API key:
 
-* **Framework:** Flutter
-* **Language:** Dart
-* **Core Libraries:** `dart:math`, `dart:async`
-* **Charting:** `fl_chart` (Used for Line Charts and Radar Charts)
+1. Tap the key icon in the app bar ("OpenAI API Key").
+2. Paste your OpenAI API key (`sk-...`) into the secure prompt and press Save.
+3. The key is stored locally in the app documents directory by default (file `.openai_api_key`).
 
----
-### EEG REALTIME SIGNAL ANALYSIS
-
-### Prerequisites
-
-* Flutter SDK installed and configured.
-* A physical device or simulator running iOS, Android, or desktop.
-
-### Installation and Run
-
-1.  **Clone the repository:**
-    ```bash
-    git clone [repository_url_here]
-    cd eeg_realtime_console
-    ```
-
-2.  **Get packages:**
-    ```bash
-    flutter pub get
-    ```
-
-3.  **Run the application:**
-    ```bash
-    flutter run
-    ```
-    *(Note: This application is best viewed on a tablet or desktop emulator/window due to the wide dashboard layout.)*
+Model, privacy and limits:
+- The prompt includes numerical features only (no raw user text). The app sends only aggregated stats and a short snippet summary (mean, RMS); it does not send full user files.
+- Be aware of rate limits and costs associated with your OpenAI plan!!!
 
 ---
 
-## ⚙️ Core Logic
+## Signal details (how the synthetic EEG is generated)
 
-The real-time processing is handled by the `SignalProcessor` class:
+- Sample rate (Fs): 256 Hz
+- Duration: 4 seconds → 1024 samples
+- Composition: sum of
+  - Alpha (10 Hz) — amplitude ~1.0
+  - Theta (6 Hz) — amplitude ~0.5
+  - Small Beta (20 Hz) — amplitude ~0.2
+  - Additive white noise — amplitude ~0.08
 
-* **Signal Simulation:** Generates a synthetic signal composed of Sine waves at common EEG frequencies (e.g., 10Hz Alpha, 6Hz Theta) plus Gaussian noise.
-* **Buffering:** A fixed-length circular buffer (`bufferLength = 4 seconds * 256 Hz = 1024 samples`) stores the most recent data.
-* **FFT Calculation:** The `fft` function performs the Cooley-Tukey algorithm to convert the time-domain data into the frequency domain, enabling the Spectrum and Band Power analysis.
-* **Hjorth Parameters:** Calculated from the buffered signal to quantify signal complexity and activity for the statistical analysis.
+These parameters are chosen so the FFT clearly shows a dominant peak at ~10 Hz and a smaller peak near 6 Hz.
+
+---
+
+## Signal processing implemented in the app
+
+- FFT: time-domain → frequency-domain conversion (Dart implementation). The app computes raw magnitudes and uses a half-spectrum up to Nyquist (Fs/2).
+- Band power: magnitude-averaging across canonical EEG bands:
+  - Delta: 0.5–4 Hz
+  - Theta: 4–8 Hz
+  - Alpha: 8–13 Hz
+  - Beta: 13–30 Hz
+
+Notes: The implementation is intended for demonstration and teaching. For production-level PSD estimation use windowing (Hann), overlap, and normalization (or dedicated libraries).
+
+---
+
+## UI / Visualization
+
+- Single-screen dashboard with a modern dark theme and responsive spacing.
+- Panels:
+  1. Raw signal line chart (time axis: 0–4 s).
+  2. FFT magnitude chart (frequency axis: 0–128 Hz).
+  3. Band-power radar chart and cards: Delta / Theta / Alpha / Beta.
+  4. Educational Brain Demo (separate route) with an interactive 3D-like head projection.
+- Charting: `fl_chart` is used for charts.
+
+---
+
+## Run & build (Windows development machine)
+
+1. Verify Flutter and device:
+
+```cmd
+flutter doctor
+flutter devices
+```
+
+2. Fetch packages and run:
+
+```cmd
+cd soloproject
+flutter pub get
+flutter run  # to run on the default device (emulator/desktop)
+flutter run -d <device-id>  # to run on a specific device
+```
+
+---
+
+
