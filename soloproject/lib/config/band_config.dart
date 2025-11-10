@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-/// Configuration for EEG frequency bands.
+/// configuration for EEG frequency bands (and FFT visualization)
 class BandConfig {
   static const Map<String, Map<String, dynamic>> bands = {
     'Delta': {
