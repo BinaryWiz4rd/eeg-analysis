@@ -15,6 +15,5 @@ void main() {
     expect(find.text('Theta'), findsOneWidget);
     expect(find.text('Alpha'), findsOneWidget);
     expect(find.text('Beta'), findsOneWidget);
-
   });
 }
